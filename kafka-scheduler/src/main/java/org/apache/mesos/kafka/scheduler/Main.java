@@ -27,7 +27,7 @@ public final class Main extends Application<DropwizardConfiguration> {
   private static final Logger LOGGER = LoggerFactory.getLogger(Main.class);
 
   public static void main(String[] args) throws Exception {
-    System.out.println("TEST BOO");
+    System.out.println("once more, but with feeling!");
     new Main().run(args);
   }
 
