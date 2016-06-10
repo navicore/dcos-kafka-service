@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""DCOS Kafka"""
+"""DCOS Confluent"""
 import os
 from operator import xor
 
@@ -31,9 +31,9 @@ def cli():
 @click.option('--info/--no-info', default=False)
 @click.option('--name', help='Name of the Kafka instance to query')
 @click.option('--config-schema',
-              help='Prints the config schema for kafka.', is_flag=True)
-def kafka(info, name, config_schema):
-    """CLI Module for interaction with a DCOS Kafka service"""
+              help='Prints the config schema for confluent.', is_flag=True)
+def confluent(info, name, config_schema):
+    """CLI Module for interaction with a DCOS Confluent service"""
     if info:
         print("Deploy and manage Kafka clusters")
     if name:
@@ -44,17 +44,17 @@ def kafka(info, name, config_schema):
 
 def print_schema():
     schema = pkg_resources.resource_string(
-        'dcos_kafka',
-        'data/config-schema/kafka.json'
+        'dcos_confluent',
+        'data/config-schema/confluent.json'
     ).decode('utf-8')
     print(schema)
 
 
-@kafka.command()
+@confluent.command()
 def help():
-    print("Usage: dcos help kafka")
+    print("Usage: dcos help confluent")
 
-@kafka.command()
+@confluent.command()
 @click.option('--address', is_flag=True)
 @click.option('--dns', is_flag=True)
 def connection(address, dns):
@@ -70,7 +70,7 @@ def connection(address, dns):
         cluster_api.connection_dns()
 
 
-@kafka.group()
+@confluent.group()
 @click.option('--name', help='Name of the Kafka instance to query')
 def broker(name):
     """Kafka Broker maintenance"""
@@ -98,7 +98,7 @@ def replace(broker_id):
     broker_api.replace(broker_id)
 
 
-@kafka.group()
+@confluent.group()
 @click.option('--name', help='Name of the Kafka instance to query')
 def config(name):
     """Service configuration maintenance"""
@@ -125,7 +125,7 @@ def target():
     cluster_api.describe_target_configuration()
 
 
-@kafka.group()
+@confluent.group()
 @click.option('--name', help='Name of the Kafka instance to query')
 def plan(name):
     """Rollout plan maintenance"""
@@ -170,7 +170,7 @@ def restart_plan():
     plan_api.restart_cmd()
 
 
-@kafka.group()
+@confluent.group()
 @click.option('--name', help='Name of the Kafka instance to query')
 def topic(name):
     """Kafka Topic maintenance"""

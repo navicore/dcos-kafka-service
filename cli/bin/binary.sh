@@ -16,6 +16,7 @@
 
 echo "Building binary..."
 pyinstaller binary/binary.spec
+pyinstaller binary/binary-confluent.spec
 
 docker-check() {
   time=2
@@ -35,7 +36,9 @@ if [ "$(uname)" == "Darwin" ]; then
     # Do something under Mac OS X platform
     mkdir -p dist/darwin
     mv dist/dcos-kafka dist/darwin
+    mv dist/dcos-confluent dist/darwin
     shasum -a 256 dist/darwin/dcos-kafka | awk '{print $1}' > dist/darwin/dcos-kafka.sha
+    shasum -a 256 dist/darwin/dcos-confluent | awk '{print $1}' > dist/darwin/dcos-confluent.sha1
     echo "Darin Build Complete!"
 
     # linux build on a darwin plaform if docker runs
@@ -47,13 +50,14 @@ if [ "$(uname)" == "Darwin" ]; then
     docker run --name kafka-binary kafka-binary
     mkdir -p dist/linux
     docker cp kafka-binary:/dcos-kafka/dist/linux dist/
-    shasum -a 256 dist/linux/dcos-kafka | awk '{print $1}' > dist/linux/dcos-kafka.sha
 
 elif [ "$(expr substr $(uname -s) 1 5)" == "Linux" ]; then
       # Do something under GNU/Linux platform  #statements
       mkdir -p dist/linux
       mv dist/dcos-kafka dist/linux
+      mv dist/dcos-confluent dist/linux
       sha256sum dist/linux/dcos-kafka | awk '{print $1}' > dist/linux/dcos-kafka.sha
+      sha256sum dist/linux/dcos-confluent | awk '{print $1}' > dist/linux/dcos-confluent.sha1
       echo "Linux Build Complete"
 fi
 
