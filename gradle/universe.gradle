@@ -3,6 +3,8 @@ ext {
   basePath = "kafka/assets/"
   packageVer = "stub-universe" // is replaced
   cliBase = "dcos-kafka-"
+  cliLinuxSha = "cli-linux-sha256"
+  cliDarwinSha = "cli-darwin-sha256"
 }
 
 task packageVersion (
@@ -12,8 +14,25 @@ task packageVersion (
   println packageVer
 }
 
+task cliShas() {
+  def darwinShaFile = file("$rootProject.projectDir/cli/dist/darwin/dcos-kafka.sha")
+  def linuxShaFile = file("$rootProject.projectDir/cli/dist/linux/dcos-kafka.sha")
+  if(darwinShaFile.exists()) {
+    cliDarwinSha  = darwinShaFile.text
+    print "darwin sha: $cliDarwinSha"
+  } else {
+    println "CLI darwin sha file missing."
+  }
+  if(linuxShaFile.exists()) {
+    cliLinuxSha  = linuxShaFile.text
+    print "linux sha: $cliLinuxSha"
+  } else {
+    println "CLI linux sha file missing."
+  }
+}
+
 task universe(
-  dependsOn: packageVersion,
+  dependsOn: [packageVersion, cliShas],
   group: "universe",
   description: "Copies universe files to build and modifies there artifact dir") {
   inputs.file file("universe/package")
@@ -30,6 +49,12 @@ task universe(
       into "$buildDir/universe"
       filter{
         String line -> line.replaceAll("\\{\\{artifact-dir\\}\\}", aws + basePath + packageVer)
+      }
+      filter{
+        String line -> line.replaceAll("\\{\\{cli-darwin-sha256\\}\\}", cliDarwinSha)
+      }
+      filter{
+        String line -> line.replaceAll("\\{\\{cli-linux-sha256\\}\\}", cliLinuxSha)
       }
       filter{
         String line -> line.replaceAll("stub-universe", packageVer)
