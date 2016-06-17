@@ -5,7 +5,6 @@ import com.codahale.metrics.health.HealthCheck;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
-import org.apache.mesos.kafka.plan.KafkaStageManager;
 import org.apache.mesos.kafka.plan.KafkaUpdatePhase;
 import org.apache.mesos.kafka.state.KafkaStateService;
 import org.apache.mesos.scheduler.plan.*;
@@ -14,13 +13,10 @@ public class BrokerCheck extends HealthCheck {
   public static final String NAME = "brokerCount";
   private final Log log = LogFactory.getLog(BrokerCheck.class);
 
-  private final int NO_UPDATE_PHASE_CODE = 512;
-  private final int NOT_ENOUGH_BROKERS_CODE = 513;
-
-  private final KafkaStageManager stageManager;
+  private final StageManager stageManager;
   private final KafkaStateService state;
 
-  public BrokerCheck(KafkaStageManager stageManager, KafkaStateService state) {
+  public BrokerCheck(StageManager stageManager, KafkaStateService state) {
     this.stageManager = stageManager;
     this.state = state;
   }

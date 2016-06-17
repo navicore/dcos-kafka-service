@@ -48,7 +48,7 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 
-./gradlew test
+./gradlew check
 if [ $? -ne 0 ]; then
   _notify_github failure build "Unit tests failed"
   exit 1
@@ -68,4 +68,5 @@ _notify_github success build "Build succeeded"
   universe/package/ \
   kafka-scheduler/build/distributions/*.zip \
   kafka-config-overrider/build/distributions/*zip \
-  cli/dist/dcos-kafka-*.tar.gz
+  cli/dist/dcos-kafka-*.tar.gz \
+  kafka-executor/build/distributions/*.zip 
