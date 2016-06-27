@@ -48,17 +48,17 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 
-./gradlew check
-if [ $? -ne 0 ]; then
-  _notify_github failure build "Unit tests failed"
-  exit 1
-fi
-
-make --directory=cli/ all
-if [ $? -ne 0 ]; then
-  _notify_github error build "CLI build/tests failed"
-  exit 1
-fi
+#./gradlew check
+#if [ $? -ne 0 ]; then
+#  _notify_github failure build "Unit tests failed"
+#  exit 1
+#fi
+#
+#make --directory=cli/ all
+#if [ $? -ne 0 ]; then
+#  _notify_github error build "CLI build/tests failed"
+#  exit 1
+#fi
 
 _notify_github success build "Build succeeded"
 

@@ -1,9 +1,6 @@
 package org.apache.mesos.kafka.scheduler;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
-import java.util.Observable;
+import java.util.*;
 
 import io.dropwizard.setup.Environment;
 
@@ -32,6 +29,11 @@ import org.apache.mesos.reconciliation.DefaultReconciler;
 import org.apache.mesos.reconciliation.Reconciler;
 import org.apache.mesos.scheduler.SchedulerDriverFactory;
 import org.apache.mesos.scheduler.plan.*;
+import org.apache.mesos.scheduler.registry.RegistryStorageDriver;
+import org.apache.mesos.scheduler.registry.Task;
+import org.apache.mesos.scheduler.registry.TaskRegistry;
+import org.apache.mesos.scheduler.txnplan.*;
+import org.apache.mesos.scheduler.txnplan.ops.CreateTaskOp;
 
 /**
  * Kafka Framework Scheduler.
@@ -47,6 +49,8 @@ public class KafkaScheduler extends Observable implements Scheduler, Runnable {
 
   private final DefaultStageScheduler stageScheduler;
   private final KafkaRepairScheduler repairScheduler;
+  private final TaskRegistry registry;
+  private final PlanExecutor planExecutor;
 
   private final OfferAccepter offerAccepter;
   private final Reconciler reconciler;
@@ -107,6 +111,72 @@ public class KafkaScheduler extends Observable implements Scheduler, Runnable {
         kafkaState,
         offerRequirementProvider,
         offerAccepter);
+
+    registry = new TaskRegistry(offerAccepter, new RegistryStorageDriver() {
+      @Override
+      public void storeTask(Task task) {
+
+      }
+
+      @Override
+      public void deleteTask(String s) {
+
+      }
+    });
+    planExecutor = new PlanExecutor(registry, new OperationDriverFactory() {
+      @Override
+      public OperationDriver makeDriver(Step step) {
+        final UUID id = step.getUuid();
+        return new OperationDriver() {
+          @Override
+          public void save(Object o) {
+
+          }
+
+          @Override
+          public Object load() {
+            throw new RuntimeException("Not implemented");
+          }
+
+          @Override
+          public void info(String s) {
+            log.info("Step " + id + ": " + s);
+          }
+
+          @Override
+          public void error(String s) {
+            log.error("Step " + id + ": " + s);
+          }
+        };
+      }
+    }, new ZKPlanStorageDriver(configuration.getKafkaConfiguration().getZkAddress(), "txnplan"));
+
+    new Thread(new Runnable() {
+      @Override
+      public void run() {
+        try {
+          Thread.sleep(1000 * 30);
+        } catch (InterruptedException e) {
+          e.printStackTrace();
+        }
+        Plan launchPlan = new Plan();
+        List<Step> newBrokers = new ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+          OfferRequirement req = null;
+          try {
+            req = offerRequirementProvider.getNewOfferRequirement(configState.getTargetName().toString(), i);
+          } catch (InvalidRequirementException e) {
+            e.printStackTrace();
+          } catch (ConfigStoreException e) {
+            e.printStackTrace();
+          }
+          newBrokers.add(launchPlan.step(CreateTaskOp.make("broker-" + i, req)));
+        }
+        planExecutor.submitPlan(launchPlan);
+        log.warn("submitted plan " + launchPlan.getUuid());
+
+      }
+    }).start();
   }
 
   private static PhaseStrategyFactory getPhaseStrategyFactory(KafkaSchedulerConfiguration config) {
@@ -185,6 +255,7 @@ public class KafkaScheduler extends Observable implements Scheduler, Runnable {
 
     setChanged();
     notifyObservers(status);
+    registry.handleStatusUpdate(driver, status);
   }
 
   @Override
@@ -197,6 +268,7 @@ public class KafkaScheduler extends Observable implements Scheduler, Runnable {
       List<OfferID> acceptedOffers = new ArrayList<>();
 
       if (reconciler.isReconciled()) {
+        /*
         Block block = stageManager.getCurrentBlock();
         acceptedOffers = stageScheduler.resourceOffers(driver, offers, block);
         List<Offer> unacceptedOffers = filterAcceptedOffers(offers, acceptedOffers);
@@ -210,10 +282,12 @@ public class KafkaScheduler extends Observable implements Scheduler, Runnable {
         if (cleanerScheduler != null) {
           acceptedOffers.addAll(getCleanerScheduler().resourceOffers(driver, offers));
         }
+        */
       }
+      registry.handleOffers(driver, offers);
 
-      log.info("Accepted offers: " + acceptedOffers);
-      declineOffers(driver, acceptedOffers, offers);
+      //log.info("Accepted offers: " + acceptedOffers);
+      //declineOffers(driver, acceptedOffers, offers);
     } catch (Exception ex) {
       log.error("Unexpected exception encountered when processing offers: ", ex);
     }
