@@ -7,6 +7,9 @@ import io.dropwizard.setup.Environment;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
+import org.apache.curator.framework.CuratorFramework;
+import org.apache.curator.framework.CuratorFrameworkFactory;
+import org.apache.curator.retry.BoundedExponentialBackoffRetry;
 import org.apache.mesos.Protos.*;
 import org.apache.mesos.Scheduler;
 import org.apache.mesos.SchedulerDriver;
@@ -32,6 +35,7 @@ import org.apache.mesos.scheduler.plan.*;
 import org.apache.mesos.scheduler.registry.RegistryStorageDriver;
 import org.apache.mesos.scheduler.registry.Task;
 import org.apache.mesos.scheduler.registry.TaskRegistry;
+import org.apache.mesos.scheduler.registry.ZKRegistryStorageDriver;
 import org.apache.mesos.scheduler.txnplan.*;
 import org.apache.mesos.scheduler.txnplan.ops.CreateTaskOp;
 
@@ -60,6 +64,9 @@ public class KafkaScheduler extends Observable implements Scheduler, Runnable {
   private static List<String> tasksToRestart = new ArrayList<String>();
   private static final Integer rescheduleLock = 0;
   private static List<String> tasksToReschedule = new ArrayList<String>();
+  private final KafkaSchedulerConfiguration configuration;
+  private final KafkaOfferRequirementProvider offerRequirementProvider;
+  private final CuratorFramework curator;
 
   public KafkaScheduler(KafkaSchedulerConfiguration configuration, Environment environment) throws ConfigStoreException {
     ConfigStateUpdater configStateUpdater = new ConfigStateUpdater(configuration);
@@ -80,6 +87,7 @@ public class KafkaScheduler extends Observable implements Scheduler, Runnable {
     envConfig = targetConfigToUse;
     reconciler = new DefaultReconciler();
 
+    this.configuration = configuration;
     configState = configStateUpdater.getConfigState();
     kafkaState = configStateUpdater.getKafkaState();
     addObserver(kafkaState);
@@ -87,7 +95,7 @@ public class KafkaScheduler extends Observable implements Scheduler, Runnable {
     offerAccepter =
       new OfferAccepter(Arrays.asList(new PersistentOperationRecorder(kafkaState)));
 
-    KafkaOfferRequirementProvider offerRequirementProvider =
+    offerRequirementProvider =
       new PersistentOfferRequirementProvider(kafkaState, configState);
 
     List<Phase> phases = Arrays.asList(
@@ -112,71 +120,16 @@ public class KafkaScheduler extends Observable implements Scheduler, Runnable {
         offerRequirementProvider,
         offerAccepter);
 
-    registry = new TaskRegistry(offerAccepter, new RegistryStorageDriver() {
-      @Override
-      public void storeTask(Task task) {
-
-      }
-
-      @Override
-      public void deleteTask(String s) {
-
-      }
-    });
-    planExecutor = new PlanExecutor(registry, new OperationDriverFactory() {
-      @Override
-      public OperationDriver makeDriver(Step step) {
-        final UUID id = step.getUuid();
-        return new OperationDriver() {
-          @Override
-          public void save(Object o) {
-
-          }
-
-          @Override
-          public Object load() {
-            throw new RuntimeException("Not implemented");
-          }
-
-          @Override
-          public void info(String s) {
-            log.info("Step " + id + ": " + s);
-          }
-
-          @Override
-          public void error(String s) {
-            log.error("Step " + id + ": " + s);
-          }
-        };
-      }
-    }, new ZKPlanStorageDriver(configuration.getKafkaConfiguration().getZkAddress(), "txnplan"));
-
-    new Thread(new Runnable() {
-      @Override
-      public void run() {
-        try {
-          Thread.sleep(1000 * 30);
-        } catch (InterruptedException e) {
-          e.printStackTrace();
-        }
-        Plan launchPlan = new Plan();
-        List<Step> newBrokers = new ArrayList<>();
-        for (int i = 0; i < 5; i++) {
-          OfferRequirement req = null;
-          try {
-            req = offerRequirementProvider.getNewOfferRequirement(configState.getTargetName().toString(), i);
-          } catch (InvalidRequirementException e) {
-            e.printStackTrace();
-          } catch (ConfigStoreException e) {
-            e.printStackTrace();
-          }
-          newBrokers.add(launchPlan.step(CreateTaskOp.make("broker-" + i, req)));
-        }
-        planExecutor.submitPlan(launchPlan);
-        log.warn("submitted plan " + launchPlan.getUuid());
-
-      }
-    }).start();
+    curator = CuratorFrameworkFactory.builder()
+            .connectString(configuration.getKafkaConfiguration().getZkAddress())
+            .retryPolicy(new BoundedExponentialBackoffRetry(100, 120000, 10))
+            .namespace("txnplan")
+            .build();
+    curator.start();
+    registry = new TaskRegistry(offerAccepter, new ZKRegistryStorageDriver(curator));
+    planExecutor = new PlanExecutor(registry,
+            new ZKOperationDriverFactory(curator),
+            new ZKPlanStorageDriver(curator));
   }
 
   private static PhaseStrategyFactory getPhaseStrategyFactory(KafkaSchedulerConfiguration config) {
@@ -237,6 +190,22 @@ public class KafkaScheduler extends Observable implements Scheduler, Runnable {
   public void registered(SchedulerDriver driver, FrameworkID frameworkId, MasterInfo masterInfo) {
     log.info("Registered framework with frameworkId: " + frameworkId.getValue());
     kafkaState.setFrameworkId(frameworkId);
+    Plan launchPlan = new Plan();
+    List<Step> newBrokers = new ArrayList<>();
+    for (int i = 0; i < configuration.getServiceConfiguration().getCount(); i++) {
+      OfferRequirement req = null;
+      try {
+        req = offerRequirementProvider.getNewOfferRequirement(configState.getTargetName().toString(), i);
+      } catch (InvalidRequirementException e) {
+        e.printStackTrace();
+      } catch (ConfigStoreException e) {
+        e.printStackTrace();
+      }
+      newBrokers.add(launchPlan.step(CreateTaskOp.make("broker-" + i, req)));
+    }
+    planExecutor.submitPlan(launchPlan);
+    log.warn("submitted plan " + launchPlan.getUuid());
+
   }
 
   @Override
