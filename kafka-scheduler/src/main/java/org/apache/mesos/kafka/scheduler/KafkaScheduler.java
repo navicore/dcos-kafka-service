@@ -21,6 +21,7 @@ import org.apache.mesos.kafka.config.ConfigStateValidator.ValidationException;
 import org.apache.mesos.kafka.config.KafkaConfigState;
 import org.apache.mesos.kafka.config.KafkaSchedulerConfiguration;
 import org.apache.mesos.kafka.offer.KafkaOfferRequirementProvider;
+import org.apache.mesos.kafka.offer.OfferUtils;
 import org.apache.mesos.kafka.offer.PersistentOfferRequirementProvider;
 import org.apache.mesos.kafka.offer.PersistentOperationRecorder;
 import org.apache.mesos.kafka.plan.KafkaUpdatePhase;
@@ -123,13 +124,38 @@ public class KafkaScheduler extends Observable implements Scheduler, Runnable {
     curator = CuratorFrameworkFactory.builder()
             .connectString(configuration.getKafkaConfiguration().getZkAddress())
             .retryPolicy(new BoundedExponentialBackoffRetry(100, 120000, 10))
-            .namespace("txnplan")
+            .namespace("kafka/txnplan")
             .build();
     curator.start();
     registry = new TaskRegistry(offerAccepter, new ZKRegistryStorageDriver(curator));
     planExecutor = new PlanExecutor(registry,
             new ZKOperationDriverFactory(curator),
             new ZKPlanStorageDriver(curator));
+
+    new Thread(new Runnable() {
+      @Override
+      public void run() {
+        Thread.currentThread().setName("repair scheduler");
+        while (true) {
+          try {
+            Thread.sleep(1000);
+            Collection<Task> tasks = registry.getAllTasks();
+            for (Task task : tasks) {
+              if (task.getLatestTaskStatus() == null) {
+                continue;
+              }
+              if (TaskUtils.isTerminated(task.getLatestTaskStatus())) {
+                log.warn("Detected failed task, replacing");
+                registry.replaceTask(task.getName(),
+                        offerRequirementProvider.getReplacementOfferRequirement(task.getTaskInfo()));
+              }
+            }
+          } catch (Throwable t) {
+            log.error("Error happened during repair scheduler cycle", t);
+          }
+        }
+      }
+    }).start();
   }
 
   private static PhaseStrategyFactory getPhaseStrategyFactory(KafkaSchedulerConfiguration config) {
@@ -166,6 +192,7 @@ public class KafkaScheduler extends Observable implements Scheduler, Runnable {
   @Override
   public void error(SchedulerDriver driver, String message) {
     log.error("Scheduler driver error: " + message);
+    System.exit(2);
   }
 
   @Override
@@ -190,76 +217,58 @@ public class KafkaScheduler extends Observable implements Scheduler, Runnable {
   public void registered(SchedulerDriver driver, FrameworkID frameworkId, MasterInfo masterInfo) {
     log.info("Registered framework with frameworkId: " + frameworkId.getValue());
     kafkaState.setFrameworkId(frameworkId);
-    Plan launchPlan = new Plan();
-    List<Step> newBrokers = new ArrayList<>();
-    for (int i = 0; i < configuration.getServiceConfiguration().getCount(); i++) {
-      OfferRequirement req = null;
-      try {
-        req = offerRequirementProvider.getNewOfferRequirement(configState.getTargetName().toString(), i);
-      } catch (InvalidRequirementException e) {
-        e.printStackTrace();
-      } catch (ConfigStoreException e) {
-        e.printStackTrace();
+    new Thread(new Runnable() {
+      @Override
+      public void run() {
+        log.info("Starting reconciliation");
+        registry.reconcile();
+        log.info("Reconciliation finished, launching plan");
+        Plan launchPlan = new Plan();
+        List<Step> newBrokers = new ArrayList<>();
+        Collection<Task> existingTasks = registry.getAllTasks();
+        for (int i = 0; i < configuration.getServiceConfiguration().getCount(); i++) {
+          String name = OfferUtils.idToName(i);
+          if (existingTasks.stream().anyMatch(t -> t.getName().equals(name))) {
+            log.info("Already have " + name + " as a task, not launching a new one");
+            continue;
+          }
+          OfferRequirement req = null;
+          try {
+            req = offerRequirementProvider.getNewOfferRequirement(configState.getTargetName().toString(), i);
+          } catch (InvalidRequirementException e) {
+            e.printStackTrace();
+          } catch (ConfigStoreException e) {
+            e.printStackTrace();
+          }
+          newBrokers.add(launchPlan.step(CreateTaskOp.make("broker-" + i, req)));
+        }
+        planExecutor.submitPlan(launchPlan);
+        log.warn("submitted plan " + launchPlan.getUuid());
       }
-      newBrokers.add(launchPlan.step(CreateTaskOp.make("broker-" + i, req)));
-    }
-    planExecutor.submitPlan(launchPlan);
-    log.warn("submitted plan " + launchPlan.getUuid());
-
+    }).start();
   }
 
   @Override
   public void reregistered(SchedulerDriver driver, MasterInfo masterInfo) {
     log.info("Reregistered framework.");
-    reconcile();
+    registry.reconcileAsync();
   }
 
   @Override
   public void statusUpdate(SchedulerDriver driver, TaskStatus status) {
-    log.info(String.format(
+    /*log.info(String.format(
         "Received status update for taskId=%s state=%s message='%s'",
         status.getTaskId().getValue(),
         status.getState().toString(),
         status.getMessage()));
+        */
 
-    setChanged();
-    notifyObservers(status);
     registry.handleStatusUpdate(driver, status);
   }
 
   @Override
   public void resourceOffers(SchedulerDriver driver, List<Offer> offers) {
-    try {
-      logOffers(offers);
-      reconciler.reconcile(driver);
-      processTaskOperations(driver);
-
-      List<OfferID> acceptedOffers = new ArrayList<>();
-
-      if (reconciler.isReconciled()) {
-        /*
-        Block block = stageManager.getCurrentBlock();
-        acceptedOffers = stageScheduler.resourceOffers(driver, offers, block);
-        List<Offer> unacceptedOffers = filterAcceptedOffers(offers, acceptedOffers);
-        try {
-          acceptedOffers.addAll(repairScheduler.resourceOffers(driver, unacceptedOffers, block));
-        } catch (InvalidRequirementException e) {
-          log.error("Error repairing block: " + block + " Reason: " + e);
-        }
-
-        ResourceCleanerScheduler cleanerScheduler = getCleanerScheduler();
-        if (cleanerScheduler != null) {
-          acceptedOffers.addAll(getCleanerScheduler().resourceOffers(driver, offers));
-        }
-        */
-      }
-      registry.handleOffers(driver, offers);
-
-      //log.info("Accepted offers: " + acceptedOffers);
-      //declineOffers(driver, acceptedOffers, offers);
-    } catch (Exception ex) {
-      log.error("Unexpected exception encountered when processing offers: ", ex);
-    }
+    registry.handleOffers(driver, offers);
   }
 
   private ResourceCleanerScheduler getCleanerScheduler() {
@@ -269,64 +278,6 @@ public class KafkaScheduler extends Observable implements Scheduler, Runnable {
     } catch (Exception ex) {
       log.error("Failed to construct ResourceCleaner with exception:", ex);
       return null;
-    }
-  }
-
-  private List<Offer> filterAcceptedOffers(List<Offer> offers, List<OfferID> acceptedOfferIds) {
-    List<Offer> filteredOffers = new ArrayList<Offer>();
-
-    for (Offer offer : offers) {
-      if (!offerAccepted(offer, acceptedOfferIds)) {
-        filteredOffers.add(offer);
-      }
-    }
-
-    return filteredOffers;
-  }
-
-  private boolean offerAccepted(Offer offer, List<OfferID> acceptedOfferIds) {
-    for (OfferID acceptedOfferId: acceptedOfferIds) {
-      if(acceptedOfferId.equals(offer.getId())) {
-        return true;
-      }
-    }
-
-    return false;
-  }
-
-  private void processTaskOperations(SchedulerDriver driver) {
-    processTasksToRestart(driver);
-    processTasksToReschedule(driver);
-  }
-
-  private void processTasksToRestart(SchedulerDriver driver) {
-    synchronized (restartLock) {
-      for (String taskId : tasksToRestart) {
-        if (taskId != null) {
-          log.info("Restarting task: " + taskId);
-          driver.killTask(TaskID.newBuilder().setValue(taskId).build());
-        } else {
-          log.warn("Asked to restart null task.");
-        }
-      }
-
-      tasksToRestart = new ArrayList<String>();
-    }
-  }
-
-  private void processTasksToReschedule(SchedulerDriver driver) {
-    synchronized (rescheduleLock) {
-      for (String taskId : tasksToReschedule) {
-        if (taskId != null) {
-          log.info("Rescheduling task: " + taskId);
-          kafkaState.deleteTask(taskId);
-          driver.killTask(TaskID.newBuilder().setValue(taskId).build());
-        } else {
-          log.warn("Asked to reschedule null task.");
-        }
-      }
-
-      tasksToReschedule = new ArrayList<String>();
     }
   }
 
@@ -346,30 +297,6 @@ public class KafkaScheduler extends Observable implements Scheduler, Runnable {
     registerFramework(this, fwkInfo, zkPath);
   }
 
-  private void reconcile() {
-    Block recBlock = getReconciliationBlock();
-
-    if (recBlock != null) {
-      recBlock.restart();
-    } else {
-      log.error("Failed to reconcile because unable to find the Reconciliation Block");
-    }
-  }
-
-  private Block getReconciliationBlock() {
-    Stage stage = stageManager.getStage();
-
-    for (Phase phase : stage.getPhases()) {
-      for (Block block : phase.getBlocks()) {
-        if (block instanceof ReconciliationBlock) {
-          return block;
-        }
-      }
-    }
-
-    return null;
-  }
-
   private FrameworkInfo getFrameworkInfo() {
     FrameworkInfo.Builder fwkInfoBuilder = FrameworkInfo.newBuilder()
       .setName(envConfig.getServiceConfiguration().getName())
@@ -387,26 +314,6 @@ public class KafkaScheduler extends Observable implements Scheduler, Runnable {
     return fwkInfoBuilder.build();
   }
 
-  private void logOffers(List<Offer> offers) {
-    if (offers == null) {
-      return;
-    }
-
-    log.info(String.format("Received %d offers", offers.size()));
-
-    for (Offer offer : offers) {
-      log.info("Received Offer: " + offer);
-    }
-  }
-
-  private void declineOffers(SchedulerDriver driver, List<OfferID> acceptedOffers, List<Offer> offers) {
-    for (Offer offer : offers) {
-      if (!acceptedOffers.contains(offer.getId())) {
-        log.info("Declining offer: " + offer.getId());
-        declineOffer(driver, offer);
-      }
-    }
-  }
 
   private void declineOffer(SchedulerDriver driver, Offer offer) {
     OfferID offerId = offer.getId();
@@ -420,6 +327,7 @@ public class KafkaScheduler extends Observable implements Scheduler, Runnable {
     driver.run();
   }
 
+  // TODO this should move to the commons to solve a common serious error in java development
   private Thread.UncaughtExceptionHandler getUncaughtExceptionHandler() {
 
     return new Thread.UncaughtExceptionHandler() {
