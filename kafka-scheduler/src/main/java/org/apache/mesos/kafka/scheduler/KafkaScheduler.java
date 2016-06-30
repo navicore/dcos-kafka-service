@@ -240,7 +240,7 @@ public class KafkaScheduler extends Observable implements Scheduler, Runnable {
           } catch (ConfigStoreException e) {
             e.printStackTrace();
           }
-          newBrokers.add(launchPlan.step(CreateTaskOp.make("broker-" + i, req)));
+          newBrokers.add(launchPlan.step(CreateTaskOp.make("broker-" + i, req, false)));
         }
         planExecutor.submitPlan(launchPlan);
         log.warn("submitted plan " + launchPlan.getUuid());
