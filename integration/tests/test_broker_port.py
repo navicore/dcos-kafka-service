@@ -1,10 +1,9 @@
-from functools import wraps
 import json
 import os
 import time
 
+import pytest
 import requests
-
 import shakedown
 
 
@@ -22,46 +21,12 @@ MARATHON_REQUEST_HEADERS = {
 }
 
 
-def installs_package(options_file):
-    def decorator(fn):
-        @wraps(fn)
-        def wrapped(*args, **kwargs):
-            shakedown.install_package_and_wait(
-                PACKAGE_NAME, options_file=options_file
-            )
-
-            return fn(*args, **kwargs)
-
-        return wrapped
-
-    return decorator
-
-
-def uninstalls_package(fn):
-    @wraps(fn)
-    def wrapped(*args, **kwargs):
-        try:
-            result = fn(*args, **kwargs)
-        except Exception as e:
-            raise e
-        finally:
-            shakedown.uninstall_package_and_wait(PACKAGE_NAME)
-            shakedown.run_command_on_master(
-                'docker run mesosphere/janitor /janitor.py '
-                '-r kafka-role -p kafka-principal -z kafka'
-            )
-
-        return result
-
-    return wrapped
-
-
 def get_kafka_config():
     response = requests.get(
         marathon_api_url('apps/kafka/versions'),
         headers=MARATHON_REQUEST_HEADERS
     )
-    assert response.status_code == 200
+    assert response.status_code == 200, 'Marathon versions request failed'
 
     version = response.json()['versions'][0]
 
@@ -144,27 +109,45 @@ def spin(fn, success_predicate, *args, **kwargs):
     return result
 
 
-@installs_package(options_file=DYNAMIC_PORT_OPTIONS_FILE)
-@uninstalls_package
-def test_installation_succeeds():
+def uninstall():
+    shakedown.uninstall_package_and_wait(PACKAGE_NAME)
+    shakedown.run_command_on_master(
+        'docker run mesosphere/janitor /janitor.py '
+        '-r kafka-role -p kafka-principal -z kafka'
+    )
+
+
+@pytest.yield_fixture
+def dynamic_port_config():
+    shakedown.install_package_and_wait(
+        PACKAGE_NAME, options_file=DYNAMIC_PORT_OPTIONS_FILE
+    )
+    yield
+    uninstall()
+
+
+@pytest.yield_fixture
+def static_port_config():
+    shakedown.install_package_and_wait(
+        PACKAGE_NAME, options_file=STATIC_PORT_OPTIONS_FILE
+    )
+    yield
+    uninstall()
+
+
+def test_installation_succeeds(dynamic_port_config):
     assert shakedown.package_installed(PACKAGE_NAME)
 
 
-@installs_package(options_file=DYNAMIC_PORT_OPTIONS_FILE)
-@uninstalls_package
-def test_dynamic_port_comes_online():
+def test_dynamic_port_comes_online(dynamic_port_config):
     check_health()
 
 
-@installs_package(options_file=STATIC_PORT_OPTIONS_FILE)
-@uninstalls_package
-def test_static_port_comes_online():
+def test_static_port_comes_online(static_port_config):
     check_health()
 
 
-@installs_package(options_file=DYNAMIC_PORT_OPTIONS_FILE)
-@uninstalls_package
-def test_can_adjust_config_from_dynamic_to_dynamic_port():
+def test_can_adjust_config_from_dynamic_to_dynamic_port(dynamic_port_config):
     check_health()
 
     connections = get_connection_info()['address']
@@ -186,9 +169,7 @@ def test_can_adjust_config_from_dynamic_to_dynamic_port():
     )
 
 
-@installs_package(options_file=DYNAMIC_PORT_OPTIONS_FILE)
-@uninstalls_package
-def test_can_adjust_config_from_dynamic_to_static_port():
+def test_can_adjust_config_from_dynamic_to_static_port(dynamic_port_config):
     check_health()
 
     config = get_kafka_config()
@@ -209,9 +190,7 @@ def test_can_adjust_config_from_dynamic_to_static_port():
         assert hostport.split(':')[-1] == '9092'
 
 
-@installs_package(options_file=STATIC_PORT_OPTIONS_FILE)
-@uninstalls_package
-def test_can_adjust_config_from_static_to_static_port():
+def test_can_adjust_config_from_static_to_static_port(static_port_config):
     check_health()
 
     config = get_kafka_config()
@@ -232,9 +211,7 @@ def test_can_adjust_config_from_static_to_static_port():
         assert hostport.split(':')[-1] == '9095'
 
 
-@installs_package(options_file=STATIC_PORT_OPTIONS_FILE)
-@uninstalls_package
-def test_can_adjust_config_from_static_to_dynamic_port():
+def test_can_adjust_config_from_static_to_dynamic_port(static_port_config):
     check_health()
 
     config = get_kafka_config()
