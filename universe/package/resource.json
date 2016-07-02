@@ -38,6 +38,18 @@
           "kind":"executable",
           "url":"{{artifact-dir}}/cli/linux/dcos-kafka"
         }
+      },
+      "windows":{
+        "x86-64":{
+          "contentHash":[
+            {
+              "algo":"sha256",
+              "value":"{{cli-windows-sha256}}"
+            }
+          ],
+          "kind":"executable",
+          "url":"{{artifact-dir}}/cli/windows/dcos-kafka.exe"
+        }
       }
     }
   }
