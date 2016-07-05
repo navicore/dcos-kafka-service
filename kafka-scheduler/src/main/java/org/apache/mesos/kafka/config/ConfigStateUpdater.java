@@ -4,9 +4,10 @@ import java.util.UUID;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.mesos.config.ConfigStoreException;
 import org.apache.mesos.kafka.config.ConfigStateValidator.ValidationException;
-import org.apache.mesos.kafka.state.KafkaStateService;
-import org.apache.mesos.state.StateStoreException;
+import org.apache.mesos.kafka.state.FrameworkState;
+import org.apache.mesos.kafka.state.KafkaState;
 
 /**
  * Retrieves and stores configurations in the state store.
@@ -17,22 +18,18 @@ public class ConfigStateUpdater {
   private final KafkaConfigState kafkaConfigState;
   private final ConfigStateValidator validator;
   private final KafkaSchedulerConfiguration newTargetConfig;
-  private final KafkaStateService kafkaStateService;
+  private final FrameworkState frameworkState;
+  private final KafkaState kafkaState;
 
   public ConfigStateUpdater(KafkaSchedulerConfiguration newTargetConfig) {
     this.newTargetConfig = newTargetConfig;
-    final KafkaConfiguration kafkaConfiguration = newTargetConfig.getKafkaConfiguration();
-    final String frameworkName = newTargetConfig.getServiceConfiguration().getName();
 
-    // We must bootstrap config management with some values from the new config:
-    this.kafkaConfigState = new KafkaConfigState(
-            frameworkName,
-        kafkaConfiguration.getZkAddress());
-    this.kafkaStateService = new KafkaStateService(
-        kafkaConfiguration.getZkAddress(),
-        "/" + frameworkName);
-
-    this.validator = new ConfigStateValidator(kafkaStateService);
+    // We must bootstrap ZK settings from the new config:
+    ZookeeperConfiguration zkConfig = newTargetConfig.getZookeeperConfig();
+    this.kafkaConfigState = new KafkaConfigState(zkConfig);
+    this.frameworkState = new FrameworkState(zkConfig);
+    this.kafkaState = new KafkaState(zkConfig);
+    this.validator = new ConfigStateValidator(frameworkState);
   }
 
   /**
@@ -41,7 +38,7 @@ public class ConfigStateUpdater {
    * @throws StateStoreException if the new config fails to be written to persistent storage
    * @throws ValidationException if the new config is invalid or has invalid changes compared to the active config
    */
-  public KafkaSchedulerConfiguration getTargetConfig() throws StateStoreException, ValidationException {
+  public KafkaSchedulerConfiguration getTargetConfig() throws ConfigStoreException, ValidationException {
     if (!kafkaConfigState.hasTarget()) {
       log.info("Initializing config properties storage with new target.");
       setTargetConfig(newTargetConfig);
@@ -58,8 +55,8 @@ public class ConfigStateUpdater {
       if (!currTargetConfig.equals(newTargetConfig)) {
         log.info("Config change detected!");
         setTargetConfig(newTargetConfig);
-        kafkaConfigState.syncConfigs(kafkaStateService);
-        kafkaConfigState.cleanConfigs(kafkaStateService);
+        kafkaConfigState.syncConfigs(frameworkState);
+        kafkaConfigState.cleanConfigs(frameworkState);
       } else {
         log.info("No config properties changes detected.");
       }
@@ -76,13 +73,20 @@ public class ConfigStateUpdater {
   }
 
   /**
-   * Returns the underlying kafka state storage to be used elsewhere.
+   * Returns the underlying Framework state storage to be used elsewhere.
    */
-  public KafkaStateService getKafkaState() {
-    return kafkaStateService;
+  public FrameworkState getFrameworkState() {
+    return frameworkState;
   }
 
-  private void setTargetConfig(KafkaSchedulerConfiguration newTargetConfig) throws StateStoreException {
+  /**
+   * Returns the underlying Kafka state storage to be used elsewhere.
+   */
+  public KafkaState getKafkaState() {
+    return kafkaState;
+  }
+
+  private void setTargetConfig(KafkaSchedulerConfiguration newTargetConfig) throws ConfigStoreException {
     UUID targetConfigName = kafkaConfigState.store(newTargetConfig);
     kafkaConfigState.setTargetName(targetConfigName);
     log.info("Set new target config: " + targetConfigName);

@@ -5,17 +5,14 @@ import com.google.protobuf.InvalidProtocolBufferException;
 import com.mesosphere.dcos.kafka.common.KafkaTask;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.mesos.Protos;
 import org.apache.mesos.Protos.*;
 import org.apache.mesos.Protos.Environment.Variable;
 import org.apache.mesos.Protos.Value.Range;
+import org.apache.mesos.Protos.Value.Ranges;
+import org.apache.mesos.config.ConfigStoreException;
 import org.apache.mesos.kafka.config.*;
-import org.apache.mesos.kafka.state.KafkaStateService;
-import org.apache.mesos.offer.OfferRequirement;
-import org.apache.mesos.offer.PlacementStrategy;
-import org.apache.mesos.offer.ResourceUtils;
-import org.apache.mesos.offer.TaskRequirement;
-import org.apache.mesos.offer.TaskRequirement.InvalidTaskRequirementException;
+import org.apache.mesos.kafka.state.FrameworkState;
+import org.apache.mesos.offer.*;
 import org.apache.mesos.protobuf.CommandInfoBuilder;
 import org.apache.mesos.protobuf.EnvironmentBuilder;
 import org.apache.mesos.protobuf.LabelBuilder;
@@ -31,19 +28,19 @@ public class PersistentOfferRequirementProvider implements KafkaOfferRequirement
   public static final String CONFIG_TARGET_KEY = "config_target";
 
   private final KafkaConfigState configState;
-  private final KafkaStateService kafkaStateService;
+  private final FrameworkState frameworkState;
   private final PlacementStrategyManager placementStrategyManager;
 
   public PersistentOfferRequirementProvider(
-      KafkaStateService kafkaStateService, KafkaConfigState configState) {
+      FrameworkState frameworkState, KafkaConfigState configState) {
     this.configState = configState;
-    this.kafkaStateService = kafkaStateService;
-    this.placementStrategyManager = new PlacementStrategyManager(kafkaStateService);
+    this.frameworkState = frameworkState;
+    this.placementStrategyManager = new PlacementStrategyManager(frameworkState);
   }
 
   @Override
   public OfferRequirement getNewOfferRequirement(String configName, int brokerId)
-          throws TaskRequirement.InvalidTaskRequirementException {
+          throws InvalidRequirementException, ConfigStoreException {
     OfferRequirement offerRequirement = getNewOfferRequirementInternal(configName, brokerId);
     log.info("Got new OfferRequirement with TaskRequirements: " + offerRequirement.getTaskRequirements());
 
@@ -52,17 +49,17 @@ public class PersistentOfferRequirementProvider implements KafkaOfferRequirement
 
   @Override
   public OfferRequirement getReplacementOfferRequirement(TaskInfo existingTaskInfo)
-          throws TaskRequirement.InvalidTaskRequirementException {
+          throws InvalidRequirementException {
     final ExecutorInfo existingExecutor = existingTaskInfo.getExecutor();
 
     final TaskInfo.Builder replacementTaskInfo = TaskInfo.newBuilder(existingTaskInfo);
     replacementTaskInfo.clearExecutor();
     replacementTaskInfo.clearTaskId();
-    replacementTaskInfo.setTaskId(TaskID.newBuilder().setValue("").build()); // Set later
+    replacementTaskInfo.setTaskId(TaskID.newBuilder().setValue("").build()); // Set later by TaskRequirement
 
     final ExecutorInfo.Builder replacementExecutor = ExecutorInfo.newBuilder(existingExecutor);
     replacementExecutor.clearExecutorId();
-    replacementExecutor.setExecutorId(ExecutorID.newBuilder().setValue("").build()); // Set later
+    replacementExecutor.setExecutorId(ExecutorID.newBuilder().setValue("").build()); // Set later by ExecutorRequirement
 
     OfferRequirement offerRequirement = new OfferRequirement(
             Arrays.asList(replacementTaskInfo.build()),
@@ -76,7 +73,7 @@ public class PersistentOfferRequirementProvider implements KafkaOfferRequirement
 
   @Override
   public OfferRequirement getUpdateOfferRequirement(String configName, TaskInfo taskInfo)
-          throws TaskRequirement.InvalidTaskRequirementException {
+          throws InvalidRequirementException, ConfigStoreException {
     KafkaSchedulerConfiguration config = configState.fetch(UUID.fromString(configName));
     BrokerConfiguration brokerConfig = config.getBrokerConfiguration();
 
@@ -92,26 +89,63 @@ public class PersistentOfferRequirementProvider implements KafkaOfferRequirement
 
     final ExecutorInfo.Builder updatedExecutor = ExecutorInfo.newBuilder(existingExecutor);
     updatedExecutor.clearExecutorId();
-    updatedExecutor.setExecutorId(ExecutorID.newBuilder().setValue("").build()); // Set later
+    updatedExecutor.setExecutorId(ExecutorID.newBuilder().setValue("").build()); // Set later by ExecutorRequirement
 
     taskBuilder.clearExecutor();
     taskBuilder.clearTaskId();
-    taskBuilder.setTaskId(TaskID.newBuilder().setValue("").build()); // Set later
+    taskBuilder.setTaskId(TaskID.newBuilder().setValue("").build()); // Set later by TaskRequirement
+
+    CommandInfo.Builder cmdBuilder;
+    try {
+      cmdBuilder = CommandInfo.newBuilder().mergeFrom(taskBuilder.getData());
+    } catch (InvalidProtocolBufferException e) {
+      throw new InvalidRequirementException("Unable to rehydrate broker CommandInfo");
+    }
+    Map<String, String> environmentMap = fromEnvironmentToMap(cmdBuilder.getEnvironment());
+
+    String portVar = KafkaSchedulerConfiguration.KAFKA_OVERRIDE_PREFIX + "PORT";
+    String dynamicVar = "KAFKA_DYNAMIC_BROKER_PORT";
+    String dynamicValue = environmentMap.get(dynamicVar);
+    Long port = brokerConfig.getPort();
+
+    if (port == 0) {
+      if (dynamicValue != null && dynamicValue.equals(Boolean.toString(false))) {
+        // The previous configuration used a static port, so we should generate a new dynamic port.
+        port = getDynamicPort();
+        environmentMap.put(portVar, Long.toString(port));
+      } else {
+        port = Long.parseLong(environmentMap.get(portVar));
+      }
+
+      environmentMap.put(dynamicVar, Boolean.toString(true));
+      brokerConfig.setPort(port);
+    } else {
+      environmentMap.put(portVar, Long.toString(port));
+      environmentMap.put(dynamicVar, Boolean.toString(false));
+    }
+
+    taskBuilder = updatePort(taskBuilder, brokerConfig);
+
+    cmdBuilder.clearEnvironment();
+    final List<Variable> newEnvironmentVariables = EnvironmentBuilder.createEnvironment(environmentMap);
+    cmdBuilder.setEnvironment(Environment.newBuilder().addAllVariables(newEnvironmentVariables));
+    taskBuilder.setData(cmdBuilder.build().toByteString());
 
     TaskInfo updatedTaskInfo = taskBuilder.build();
 
     try {
-      OfferRequirement offerRequirement =
-          new OfferRequirement(Arrays.asList(updatedTaskInfo), updatedExecutor.build(), null, null);
+      OfferRequirement offerRequirement = new OfferRequirement(
+              Arrays.asList(updatedTaskInfo),
+              updatedExecutor.build(), null, null);
 
       log.info("Update OfferRequirement with TaskRequirements: " + offerRequirement.getTaskRequirements());
       log.info("Update OfferRequirement with ExecutorRequirement: " + offerRequirement.getExecutorRequirement());
 
       return offerRequirement;
-    } catch (InvalidTaskRequirementException e) {
-      log.warn("Failed to create update OfferRequirement with "
-          + "OrigTaskInfo[" + taskInfo + "] NewTaskInfo[" + updatedTaskInfo + "]", e);
-      return null;
+    } catch (InvalidRequirementException e) {
+      throw new InvalidRequirementException(String.format(
+          "Failed to create update OfferRequirement with OrigTaskInfo[%s] NewTaskInfo[%s]",
+          taskInfo, updatedTaskInfo), e);
     }
   }
 
@@ -119,7 +153,9 @@ public class PersistentOfferRequirementProvider implements KafkaOfferRequirement
     return String.format("-Xms%1$dM -Xmx%1$dM", heapConfig.getSizeMb());
   }
 
-  private TaskInfo.Builder updateKafkaHeapOpts(TaskInfo.Builder taskBuilder, BrokerConfiguration brokerConfig) {
+  private TaskInfo.Builder updateKafkaHeapOpts(
+      TaskInfo.Builder taskBuilder, BrokerConfiguration brokerConfig)
+          throws InvalidRequirementException {
     try {
       final CommandInfo oldCommand = CommandInfo.parseFrom(taskBuilder.getData());
       final Environment oldEnvironment = oldCommand.getEnvironment();
@@ -139,7 +175,7 @@ public class PersistentOfferRequirementProvider implements KafkaOfferRequirement
       log.info("Updated env map:" + newEnvMap);
       return taskBuilder;
     } catch (InvalidProtocolBufferException e) {
-      return null;
+      throw new InvalidRequirementException("Couldn't update heap opts", e);
     }
   }
 
@@ -171,6 +207,14 @@ public class PersistentOfferRequirementProvider implements KafkaOfferRequirement
     ValueBuilder valBuilder = new ValueBuilder(Value.Type.SCALAR);
     valBuilder.setScalar(brokerConfig.getDisk());
     return updateValue(taskBuilder, "disk", valBuilder.build());
+  }
+
+  private TaskInfo.Builder updatePort(TaskInfo.Builder taskBuilder, BrokerConfiguration brokerConfig) {
+    Range portRange = Range.newBuilder().setBegin(brokerConfig.getPort()).setEnd(brokerConfig.getPort()).build();
+    Ranges portRanges = Ranges.newBuilder().addRange(portRange).build();
+    ValueBuilder valBuilder = new ValueBuilder(Value.Type.RANGES).setRanges(portRanges);
+
+    return updateValue(taskBuilder, "ports", valBuilder.build());
   }
 
   private TaskInfo.Builder updateValue(TaskInfo.Builder taskBuilder, String name, Value updatedValue) {
@@ -207,7 +251,8 @@ public class PersistentOfferRequirementProvider implements KafkaOfferRequirement
     return taskBuilder;
   }
 
-  private TaskInfo.Builder updateCmd(TaskInfo.Builder taskBuilder, String configName) {
+  private TaskInfo.Builder updateCmd(TaskInfo.Builder taskBuilder, String configName)
+          throws InvalidRequirementException {
     EnvironmentBuilder envBuilder = new EnvironmentBuilder();
 
     try {
@@ -227,18 +272,20 @@ public class PersistentOfferRequirementProvider implements KafkaOfferRequirement
       taskBuilder.setData(cmdBuilder.build().toByteString());
 
       return taskBuilder;
-    } catch (Exception e) {
-      log.error("Error parsing commandInfo: ", e);
-      return null;
+    } catch (InvalidProtocolBufferException e) {
+      throw new InvalidRequirementException("Unable to parse CommandInfo", e);
     }
   }
 
-  private OfferRequirement getNewOfferRequirementInternal(String configName, int brokerId) throws TaskRequirement.InvalidTaskRequirementException {
+  private static Long getDynamicPort() {
+    return 9092 + ThreadLocalRandom.current().nextLong(0, 1000);
+  }
+
+  private OfferRequirement getNewOfferRequirementInternal(String configName, int brokerId)
+          throws InvalidRequirementException, ConfigStoreException {
     log.info("Getting new OfferRequirement for: " + configName);
     String overridePrefix = KafkaSchedulerConfiguration.KAFKA_OVERRIDE_PREFIX;
     String brokerName = OfferUtils.idToName(brokerId);
-    Long port = 9092 + ThreadLocalRandom.current().nextLong(0, 1000);
-    Long jmxPort = 11000 + ThreadLocalRandom.current().nextLong(0, 1000);
 
     String containerPath = "kafka-volume-" + UUID.randomUUID();
 
@@ -246,21 +293,16 @@ public class PersistentOfferRequirementProvider implements KafkaOfferRequirement
     BrokerConfiguration brokerConfig = config.getBrokerConfiguration();
     ExecutorConfiguration executorConfig = config.getExecutorConfiguration();
 
+    Long port = brokerConfig.getPort();
+    Boolean isDynamicPort = false;
+    if (port == 0) {
+      port = getDynamicPort();
+      isDynamicPort = true;
+    }
+
     String role = config.getServiceConfiguration().getRole();
     String principal = config.getServiceConfiguration().getPrincipal();
     String frameworkName = config.getServiceConfiguration().getName();
-
-    // Construct Kafka launch command
-    Map<String, String> taskEnv = new HashMap<>();
-    taskEnv.put("FRAMEWORK_NAME", frameworkName);
-    taskEnv.put("KAFKA_VER_NAME", config.getKafkaConfiguration().getKafkaVerName());
-    taskEnv.put(CONFIG_ID_KEY, configName);
-    taskEnv.put(overridePrefix + "ZOOKEEPER_CONNECT", config.getKafkaConfiguration().getZkAddress() + "/" + frameworkName);
-    taskEnv.put(overridePrefix + "BROKER_ID", Integer.toString(brokerId));
-    taskEnv.put(overridePrefix + "LOG_DIRS", containerPath + "/" + brokerName);
-    taskEnv.put(overridePrefix + "PORT", Long.toString(port));
-    taskEnv.put(overridePrefix + "LISTENERS", "PLAINTEXT://:" + port);
-    taskEnv.put("KAFKA_HEAP_OPTS", getKafkaHeapOpts(brokerConfig.getHeap()));
 
     List<String> commands = new ArrayList<>();
     commands.add("export PATH=$(ls -d $MESOS_SANDBOX/jre*/bin):$PATH"); // find directory that starts with "jre" containing "bin"
@@ -286,7 +328,7 @@ public class PersistentOfferRequirementProvider implements KafkaOfferRequirement
       .addEnvironmentVar(overridePrefix + "LOG_DIRS", containerPath + "/" + brokerName)
       .addEnvironmentVar(overridePrefix + "LISTENERS", "PLAINTEXT://:" + port)
       .addEnvironmentVar(overridePrefix + "PORT", Long.toString(port))
-      .addEnvironmentVar("JMX_PORT", Long.toString(jmxPort));
+      .addEnvironmentVar("KAFKA_DYNAMIC_BROKER_PORT", Boolean.toString(isDynamicPort));
 
     // Launch command for custom executor
     final String executorCommand = "./executor/bin/kafka-executor -Dlogback.configurationFile=executor/conf/logback.xml";
@@ -300,12 +342,12 @@ public class PersistentOfferRequirementProvider implements KafkaOfferRequirement
       .addUri(executorConfig.getExecutorUri());
 
     // Build Executor
-    final Protos.ExecutorInfo.Builder executorBuilder = Protos.ExecutorInfo.newBuilder();
+    final ExecutorInfo.Builder executorBuilder = ExecutorInfo.newBuilder();
 
     executorBuilder
       .setName(brokerName)
-      .setExecutorId(Protos.ExecutorID.newBuilder().setValue("").build()) // Set later
-      .setFrameworkId(kafkaStateService.getFrameworkId())
+      .setExecutorId(ExecutorID.newBuilder().setValue("").build()) // Set later by ExecutorRequirement
+      .setFrameworkId(frameworkState.getFrameworkId())
       .setCommand(executorCommandBuilder.build())
       .addResources(ResourceUtils.getDesiredScalar(role, principal, "cpus", executorConfig.getCpus()))
       .addResources(ResourceUtils.getDesiredScalar(role, principal, "mem", executorConfig.getMem()))
@@ -315,7 +357,7 @@ public class PersistentOfferRequirementProvider implements KafkaOfferRequirement
     TaskInfo.Builder taskBuilder = TaskInfo.newBuilder();
     taskBuilder
       .setName(brokerName)
-      .setTaskId(TaskID.newBuilder().setValue("").build()) // Set later
+      .setTaskId(TaskID.newBuilder().setValue("").build()) // Set later by TaskRequirement
       .setSlaveId(SlaveID.newBuilder().setValue("").build()) // Set later
       .setData(brokerTaskBuilder.build().toByteString())
       .addResources(ResourceUtils.getDesiredScalar(role, principal, "cpus", brokerConfig.getCpus()))
@@ -327,11 +369,7 @@ public class PersistentOfferRequirementProvider implements KafkaOfferRequirement
             Arrays.asList(
               Range.newBuilder()
               .setBegin(port)
-              .setEnd(port).build(),
-              Range.newBuilder()
-                      .setBegin(jmxPort)
-                      .setEnd(jmxPort).build())
-      ));
+              .setEnd(port).build())));
 
     if (brokerConfig.getDiskType().equals("MOUNT")) {
       taskBuilder.addResources(ResourceUtils.getDesiredMountVolume(
@@ -368,14 +406,9 @@ public class PersistentOfferRequirementProvider implements KafkaOfferRequirement
     List<SlaveID> avoidAgents = placementStrategy.getAgentsToAvoid(taskInfo);
     List<SlaveID> colocateAgents = placementStrategy.getAgentsToColocate(taskInfo);
 
-    try {
-      OfferRequirement offerRequirement = new OfferRequirement(
-          Arrays.asList(taskInfo), executorInfo, avoidAgents, colocateAgents);
-      log.info("Got new OfferRequirement with TaskInfo: " + taskInfo);
-      return offerRequirement;
-    } catch (InvalidTaskRequirementException e) {
-      log.warn("Failed to create new OfferRequirement with TaskInfo: " + taskInfo, e);
-      return null;
-    }
+    OfferRequirement offerRequirement = new OfferRequirement(
+        Arrays.asList(taskInfo), executorInfo, avoidAgents, colocateAgents);
+    log.info("Got new OfferRequirement with TaskInfo: " + taskInfo);
+    return offerRequirement;
   }
 }

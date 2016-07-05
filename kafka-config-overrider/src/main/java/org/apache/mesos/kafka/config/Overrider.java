@@ -14,6 +14,7 @@ import org.apache.commons.io.FileUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.mesos.config.ConfigStoreException;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -66,8 +67,7 @@ public final class Overrider extends Application<DropwizardConfiguration> {
     this.configuration = configEnv.getSchedulerConfiguration();
     configId = System.getenv("CONFIG_ID");
 
-    configState = new KafkaConfigState(
-            configuration.getServiceConfiguration().getName(), configuration.getKafkaConfiguration().getZkAddress());
+    configState = new KafkaConfigState(configuration.getZookeeperConfig());
 
     if (StringUtils.isBlank(configId)) {
       log.error("Require configId. Please set CONFIG_ID env var correctly.");
@@ -127,7 +127,7 @@ public final class Overrider extends Application<DropwizardConfiguration> {
     return key;
   }
 
-  private KafkaSchedulerConfiguration fetchConfig(String configName) {
+  private KafkaSchedulerConfiguration fetchConfig(String configName) throws ConfigStoreException {
     log.info("Fetching configuration: " + configName);
     return configState.fetch(UUID.fromString(configName));
   }
