@@ -126,17 +126,15 @@ def dynamic_port_config():
     uninstall()
 
 
-@pytest.yield_fixture
+@pytest.fixture
 def static_port_config():
     shakedown.install_package_and_wait(
         PACKAGE_NAME, options_file=STATIC_PORT_OPTIONS_FILE
     )
-    yield
+
+
+def teardown_module(module):
     uninstall()
-
-
-def test_installation_succeeds(dynamic_port_config):
-    assert shakedown.package_installed(PACKAGE_NAME)
 
 
 def test_dynamic_port_comes_online(dynamic_port_config):
@@ -147,7 +145,49 @@ def test_static_port_comes_online(static_port_config):
     check_health()
 
 
-def test_can_adjust_config_from_dynamic_to_dynamic_port(dynamic_port_config):
+def test_can_adjust_config_from_static_to_static_port():
+    check_health()
+
+    config = get_kafka_config()
+    config['env']['BROKER_PORT'] = '9095'
+    r = request(
+        requests.put,
+        marathon_api_url('apps/kafka'),
+        json=config,
+        headers=MARATHON_REQUEST_HEADERS
+    )
+
+    check_health()
+
+    result = get_connection_info()
+    assert len(result['address']) == 3
+
+    for hostport in result['address']:
+        assert hostport.split(':')[-1] == '9095'
+
+
+def test_can_adjust_config_from_static_to_dynamic_port():
+    check_health()
+
+    config = get_kafka_config()
+    config['env']['BROKER_PORT'] = '0'
+    r = request(
+        requests.put,
+        marathon_api_url('apps/kafka'),
+        json=config,
+        headers=MARATHON_REQUEST_HEADERS
+    )
+
+    check_health()
+
+    result = get_connection_info()
+    assert len(result['address']) == 3
+
+    for hostport in result['address']:
+        assert 9092 <= int(hostport.split(':')[-1]) <= 10092
+
+
+def test_can_adjust_config_from_dynamic_to_dynamic_port():
     check_health()
 
     connections = get_connection_info()['address']
@@ -169,7 +209,7 @@ def test_can_adjust_config_from_dynamic_to_dynamic_port(dynamic_port_config):
     )
 
 
-def test_can_adjust_config_from_dynamic_to_static_port(dynamic_port_config):
+def test_can_adjust_config_from_dynamic_to_static_port():
     check_health()
 
     config = get_kafka_config()
@@ -188,45 +228,3 @@ def test_can_adjust_config_from_dynamic_to_static_port(dynamic_port_config):
 
     for hostport in result['address']:
         assert hostport.split(':')[-1] == '9092'
-
-
-def test_can_adjust_config_from_static_to_static_port(static_port_config):
-    check_health()
-
-    config = get_kafka_config()
-    config['env']['BROKER_PORT'] = '9095'
-    r = request(
-        requests.put,
-        marathon_api_url('apps/kafka'),
-        json=config,
-        headers=MARATHON_REQUEST_HEADERS
-    )
-
-    check_health()
-
-    result = get_connection_info()
-    assert len(result['address']) == 3
-
-    for hostport in result['address']:
-        assert hostport.split(':')[-1] == '9095'
-
-
-def test_can_adjust_config_from_static_to_dynamic_port(static_port_config):
-    check_health()
-
-    config = get_kafka_config()
-    config['env']['BROKER_PORT'] = '0'
-    r = request(
-        requests.put,
-        marathon_api_url('apps/kafka'),
-        json=config,
-        headers=MARATHON_REQUEST_HEADERS
-    )
-
-    check_health()
-
-    result = get_connection_info()
-    assert len(result['address']) == 3
-
-    for hostport in result['address']:
-        assert 9092 <= int(hostport.split(':')[-1]) <= 10092
