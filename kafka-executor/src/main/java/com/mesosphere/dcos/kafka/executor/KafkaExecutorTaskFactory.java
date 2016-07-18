@@ -1,12 +1,14 @@
 package com.mesosphere.dcos.kafka.executor;
 
-import com.mesosphere.dcos.kafka.common.KafkaTask;
+import com.mesosphere.dcos.kafka.commons.KafkaTask;
+
+import java.util.List;
+
 import org.apache.mesos.ExecutorDriver;
 import org.apache.mesos.Protos;
-import org.apache.mesos.executor.ExecutorTask;
-import org.apache.mesos.executor.ExecutorTaskException;
-import org.apache.mesos.executor.ExecutorTaskFactory;
-import org.apache.mesos.executor.ProcessTask;
+import org.apache.mesos.executor.*;
+
+import java.util.Collections;
 
 public class KafkaExecutorTaskFactory implements ExecutorTaskFactory {
     @Override
@@ -21,5 +23,10 @@ public class KafkaExecutorTaskFactory implements ExecutorTaskFactory {
             default:
                 throw new ExecutorTaskException("Unknown taskType: " + taskType);
         }
+    }
+
+    @Override
+    public List<TimedExecutorTask> createTimedTasks(String taskType, Protos.ExecutorInfo executorInfo, ExecutorDriver driver) throws ExecutorTaskException {
+        return Collections.emptyList();
     }
 }

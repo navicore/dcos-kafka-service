@@ -1,9 +1,9 @@
 ext {
-  curatorVer = "2.9.1"
   dropwizardVer = '0.9.2'
   dropwizardJava8Ver = '0.9.0-1'
-  jsonVer = '20151123'
-  loggingVer = "1.1.1"
+  jsonVer = '20160212'
+  loggingVer = '1.1.1'
+  curatorTestVer = '2.9.1'
 }
 
 dependencies {
@@ -11,9 +11,11 @@ dependencies {
   compile "io.dropwizard:dropwizard-core:${dropwizardVer}"
   compile "io.dropwizard:dropwizard-client:${dropwizardVer}"
   compile "io.dropwizard.modules:dropwizard-java8:${dropwizardJava8Ver}"
-  compile "commons-logging:commons-logging:${loggingVer}"
   compile "org.json:json:${jsonVer}"
-  testCompile "org.apache.curator:curator-test:${curatorVer}"
+  compile "commons-logging:commons-logging:${loggingVer}"
+  testCompile "org.apache.curator:curator-test:${curatorTestVer}"
+  testCompile "io.dropwizard:dropwizard-testing:${dropwizardVer}"
+  testCompile project(':kafka-test-commons').sourceSets.test.output
 }
 
 task wrapper(type: Wrapper) {
@@ -23,6 +25,6 @@ task wrapper(type: Wrapper) {
 distributions {
   main {
     baseName = 'scheduler'
-    version = ""
+    version = ''
   }
 }
