@@ -39,6 +39,7 @@ import org.apache.mesos.scheduler.registry.TaskRegistry;
 import org.apache.mesos.scheduler.registry.ZKRegistryStorageDriver;
 import org.apache.mesos.scheduler.txnplan.*;
 import org.apache.mesos.scheduler.txnplan.ops.CreateTaskOp;
+import org.apache.mesos.scheduler.txnplan.ops.ReplaceAttemptOp;
 
 /**
  * Kafka Framework Scheduler.
@@ -131,6 +132,11 @@ public class KafkaScheduler extends Observable implements Scheduler, Runnable {
     planExecutor = new PlanExecutor(registry,
             new ZKOperationDriverFactory(curator),
             new ZKPlanStorageDriver(curator));
+    try {
+      planExecutor.reloadFromStorage();
+    } catch (Exception e) {
+      log.info("First start of the framework, unable to load state from storage");
+    }
 
     new Thread(new Runnable() {
       @Override
@@ -141,13 +147,25 @@ public class KafkaScheduler extends Observable implements Scheduler, Runnable {
             Thread.sleep(1000);
             Collection<Task> tasks = registry.getAllTasks();
             for (Task task : tasks) {
-              if (task.getLatestTaskStatus() == null) {
-                continue;
-              }
-              if (TaskUtils.isTerminated(task.getLatestTaskStatus())) {
-                log.warn("Detected failed task, replacing");
-                registry.replaceTask(task.getName(),
-                        offerRequirementProvider.getReplacementOfferRequirement(task.getTaskInfo()));
+              if (task.hasStatus() && TaskUtils.isTerminated(task.getLatestTaskStatus())) {
+                String taskName = task.getName();
+                int brokerIndex = Integer.parseInt(taskName.substring("broker-".length()));
+                String planName = "tardigrade-" + brokerIndex;
+                if (planExecutor.getAllPlans().stream().anyMatch(t -> t.getPlan().getName().equals(planName))) {
+                  //already in the works to be fixed
+                  continue;
+                }
+                log.info("Look at task " + taskName + " with info " + task.getTaskInfo());
+                Plan tardigradePlan = new Plan(planName);
+                Step in_place = tardigradePlan.step(new ReplaceAttemptOp(taskName,
+                        offerRequirementProvider.getReplacementOfferRequirement(task.getTaskInfo())));
+                Step delayUntil = tardigradePlan.step(
+                        new SleepOrRunningOp(3*60 /* 3 min */, true /* resumable */, taskName /* task to wait on */));
+                OfferRequirement resetReq = offerRequirementProvider.getNewOfferRequirement(configState.getTargetName().toString(), brokerIndex);
+                Step finalReplacement = tardigradePlan.step(new HardResetBrokerOp(taskName, resetReq));
+                delayUntil.requires(in_place);
+                finalReplacement.requires(delayUntil);
+                planExecutor.submitPlan(tardigradePlan);
               }
             }
           } catch (Throwable t) {
@@ -223,7 +241,11 @@ public class KafkaScheduler extends Observable implements Scheduler, Runnable {
         log.info("Starting reconciliation");
         registry.reconcile();
         log.info("Reconciliation finished, launching plan");
-        Plan launchPlan = new Plan();
+        if (planExecutor.getAllPlans().stream().anyMatch(t -> t.getPlan().getName().equals("launch"))) {
+          // There's already a launch plan running
+          return;
+        }
+        Plan launchPlan = new Plan("launch");
         List<Step> newBrokers = new ArrayList<>();
         Collection<Task> existingTasks = registry.getAllTasks();
         for (int i = 0; i < configuration.getServiceConfiguration().getCount(); i++) {
