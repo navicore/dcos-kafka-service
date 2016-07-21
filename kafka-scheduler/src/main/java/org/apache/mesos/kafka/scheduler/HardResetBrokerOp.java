@@ -31,6 +31,10 @@ public class HardResetBrokerOp implements Operation {
     @Override
     public void doAction(TaskRegistry taskRegistry, OperationDriver operationDriver) throws Exception {
         Task oldTask = taskRegistry.getTask(taskName);
+        if (oldTask.hasStatus() && oldTask.getLatestTaskStatus().getState().equals(TaskState.TASK_RUNNING)) {
+            operationDriver.info("No need to hard reset, task is running fine");
+            return;
+        }
         if (oldTask.hasStatus()) {
             TaskID id = oldTask.getLatestTaskStatus().getTaskId();
             operationDriver.info("Clean up kill of " + taskName + " which had id " + id);

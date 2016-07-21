@@ -128,7 +128,7 @@ public class KafkaScheduler extends Observable implements Scheduler, Runnable {
             .namespace("kafka/txnplan")
             .build();
     curator.start();
-    registry = new TaskRegistry(offerAccepter, new ZKRegistryStorageDriver(curator));
+    registry = new TaskRegistry(new ZKRegistryStorageDriver(curator));
     planExecutor = new PlanExecutor(registry,
             new ZKOperationDriverFactory(curator),
             new ZKPlanStorageDriver(curator));
@@ -155,10 +155,10 @@ public class KafkaScheduler extends Observable implements Scheduler, Runnable {
                   //already in the works to be fixed
                   continue;
                 }
-                log.info("Look at task " + taskName + " with info " + task.getTaskInfo());
+                log.info("Look at task " + taskName + " with info " + task.getRealizedTaskInfo());
                 Plan tardigradePlan = new Plan(planName);
                 Step in_place = tardigradePlan.step(new ReplaceAttemptOp(taskName,
-                        offerRequirementProvider.getReplacementOfferRequirement(task.getTaskInfo())));
+                        offerRequirementProvider.getReplacementOfferRequirement(task.getRealizedTaskInfo())));
                 Step delayUntil = tardigradePlan.step(
                         new SleepOrRunningOp(3*60 /* 3 min */, true /* resumable */, taskName /* task to wait on */));
                 OfferRequirement resetReq = offerRequirementProvider.getNewOfferRequirement(configState.getTargetName().toString(), brokerIndex);
