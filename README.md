@@ -109,7 +109,7 @@ DC/OS Kafka provides the following features:
                 "broker-2.kafka.mesos:9689"
             ],
             "vip": "broker.kafka.l4lb.thisdcos.directory:9092",
-            "zookeeper": "master.mesos:2181/kafka"
+            "zookeeper": "master.mesos:2181/dcos-service-kafka"
         }
 
 
